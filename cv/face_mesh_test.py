@@ -6,6 +6,8 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import mediapipe as mp
 
+LEFT_EYE = [33, 133, 159, 145]
+RIGHT_EYE = [362, 263, 386, 374]
 
 import os
 
@@ -61,10 +63,12 @@ def main():
         # -------- Draw landmarks --------
         if result.face_landmarks:
             for face_landmarks in result.face_landmarks:
-                for lm in face_landmarks:
+                for idx in LEFT_EYE + RIGHT_EYE:
+                    lm = face_landmarks[idx]
                     x = int(lm.x * frame.shape[1])
                     y = int(lm.y * frame.shape[0])
-                    cv2.circle(frame, (x, y), 1, (0, 255, 0), -1)
+                    cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)
+
 
         cv2.imshow("Face Mesh (MediaPipe Tasks)", frame)
 
