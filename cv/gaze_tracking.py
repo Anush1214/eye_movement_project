@@ -13,15 +13,25 @@ from mediapipe.tasks.python import vision
 LEFT_EYE_CORNERS  = [33, 133]
 RIGHT_EYE_CORNERS = [362, 263]
 
+LEFT_EYE_TOP_BOTTOM = [159, 145]
+RIGHT_EYE_TOP_BOTTOM = [386, 374]
+
 LEFT_IRIS  = [468, 469, 470, 471]
 RIGHT_IRIS = [472, 473, 474, 475]
+
+# -------------------------------
+# Parameters (IMPORTANT)
+# -------------------------------
+H_THRESH = 0.18
+UP_THRESH = 0.20
+DOWN_THRESH = 0.10
+SMOOTHING = 0.8   # higher = smoother
 
 # -------------------------------
 # Utility functions
 # -------------------------------
 def iris_center(iris_points):
-    iris_points = np.array(iris_points)
-    return np.mean(iris_points, axis=0)
+    return np.mean(np.array(iris_points), axis=0)
 
 # -------------------------------
 # Main
@@ -43,6 +53,9 @@ def main():
     if not cap.isOpened():
         raise RuntimeError("Cannot open camera")
 
+    smoothed_dx = 0.0
+    smoothed_dy = 0.0
+
     start_time = time.time()
 
     while True:
@@ -62,23 +75,23 @@ def main():
         timestamp_ms = int((time.time() - start_time) * 1000)
         result = face_landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        gaze_text = "No face"
+        gaze_text = "NO FACE"
 
         if result.face_landmarks:
             face_landmarks = result.face_landmarks[0]
 
-            # ----- Eye corners -----
-            left_eye_left  = face_landmarks[LEFT_EYE_CORNERS[0]]
-            left_eye_right = face_landmarks[LEFT_EYE_CORNERS[1]]
+            eye_left = face_landmarks[LEFT_EYE_CORNERS[0]]
+            eye_right = face_landmarks[LEFT_EYE_CORNERS[1]]
 
-            right_eye_left  = face_landmarks[RIGHT_EYE_CORNERS[0]]
-            right_eye_right = face_landmarks[RIGHT_EYE_CORNERS[1]]
+            lex = int(eye_left.x * w)
+            rex = int(eye_right.x * w)
 
-            # Convert to pixel coords
-            lex = int(left_eye_left.x * w)
-            rex = int(left_eye_right.x * w)
+            eye_top = face_landmarks[LEFT_EYE_TOP_BOTTOM[0]]
+            eye_bottom = face_landmarks[LEFT_EYE_TOP_BOTTOM[1]]
 
-            # ----- Iris centers -----
+            top_y = int(eye_top.y * h)
+            bottom_y = int(eye_bottom.y * h)
+
             left_iris_pts = [(int(face_landmarks[i].x * w),
                               int(face_landmarks[i].y * h)) for i in LEFT_IRIS]
 
@@ -86,33 +99,48 @@ def main():
                                int(face_landmarks[i].y * h)) for i in RIGHT_IRIS]
 
             left_iris_center = iris_center(left_iris_pts)
-            right_iris_center = iris_center(right_iris_pts)
 
-            # ----- Gaze ratio (horizontal) -----
-            left_eye_width = abs(rex - lex)
-            gaze_x = (left_iris_center[0] - lex) / left_eye_width
+            gaze_x = (left_iris_center[0] - lex) / (rex - lex + 1e-6)
+            gaze_y = (left_iris_center[1] - top_y) / (bottom_y - top_y + 1e-6)
 
-            # ----- Gaze direction -----
-            if gaze_x < 0.35:
-                gaze_text = "LOOKING LEFT"
-            elif gaze_x > 0.65:
-                gaze_text = "LOOKING RIGHT"
+            dx = gaze_x - 0.5
+            dy = gaze_y - 0.5
+
+            # ----- Temporal smoothing -----
+            smoothed_dx = SMOOTHING * smoothed_dx + (1 - SMOOTHING) * dx
+            smoothed_dy = SMOOTHING * smoothed_dy + (1 - SMOOTHING) * dy
+
+            # ----- Direction logic -----
+            if abs(smoothed_dx) > abs(smoothed_dy):
+                if smoothed_dx < -H_THRESH:
+                    gaze_text = "LEFT"
+                elif smoothed_dx > H_THRESH:
+                    gaze_text = "RIGHT"
+                else:
+                    gaze_text = "CENTER"
             else:
-                gaze_text = "LOOKING CENTER"
+                if smoothed_dy < -UP_THRESH:
+                    gaze_text = "UP"
+                elif smoothed_dy > DOWN_THRESH:
+                    gaze_text = "DOWN"
+                else:
+                    gaze_text = "CENTER"
 
-            # ----- Draw -----
+            # ----- Draw eye indicators -----
             for (x, y) in left_iris_pts + right_iris_pts:
                 cv2.circle(frame, (x, y), 2, (0, 255, 0), -1)
 
-            cv2.circle(frame,
-                       tuple(left_iris_center.astype(int)),
-                       3, (0, 0, 255), -1)
+            cv2.circle(
+                frame,
+                tuple(left_iris_center.astype(int)),
+                3, (0, 0, 255), -1
+            )
 
         cv2.putText(frame, gaze_text, (30, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1,
                     (255, 0, 0), 2)
 
-        cv2.imshow("Day 4: Gaze Tracking", frame)
+        cv2.imshow("Stable Gaze Tracking", frame)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break

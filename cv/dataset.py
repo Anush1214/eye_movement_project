@@ -14,8 +14,18 @@ from mediapipe.tasks.python import vision
 LEFT_EYE  = [33, 159, 145, 133]
 RIGHT_EYE = [362, 386, 374, 263]
 
-LEFT_EYE_CORNERS  = [33, 133]
-LEFT_IRIS  = [468, 469, 470, 471]
+LEFT_EYE_CORNERS = [33, 133]
+LEFT_EYE_TOP_BOTTOM = [159, 145]
+
+LEFT_IRIS = [468, 469, 470, 471]
+
+# -------------------------------
+# Parameters
+# -------------------------------
+H_THRESH = 0.18
+UP_THRESH = 0.20
+DOWN_THRESH = 0.10
+SMOOTHING = 0.8
 
 # -------------------------------
 # Utility functions
@@ -56,7 +66,10 @@ def main():
 
     data = []
 
-    print("Press L / R / C / B to label data, Q to quit")
+    smoothed_dx = 0.0
+    smoothed_dy = 0.0
+
+    print("Press L / R / U / D / C to label | Q to quit")
 
     start_time = time.time()
 
@@ -82,6 +95,7 @@ def main():
         if result.face_landmarks:
             face_landmarks = result.face_landmarks[0]
 
+            # ----- EAR -----
             left_eye_pts = [(int(face_landmarks[i].x * w),
                              int(face_landmarks[i].y * h)) for i in LEFT_EYE]
 
@@ -92,7 +106,7 @@ def main():
             right_ear = compute_ear(right_eye_pts)
             avg_ear = (left_ear + right_ear) / 2.0
 
-            # Gaze X
+            # ----- Iris & gaze ratios -----
             eye_left = face_landmarks[LEFT_EYE_CORNERS[0]]
             eye_right = face_landmarks[LEFT_EYE_CORNERS[1]]
 
@@ -103,38 +117,83 @@ def main():
                          int(face_landmarks[i].y * h)) for i in LEFT_IRIS]
 
             iris_c = iris_center(iris_pts)
+
             gaze_x = (iris_c[0] - lex) / (rex - lex + 1e-6)
 
-            # Labeling
+            eye_top = face_landmarks[LEFT_EYE_TOP_BOTTOM[0]]
+            eye_bottom = face_landmarks[LEFT_EYE_TOP_BOTTOM[1]]
+
+            top_y = int(eye_top.y * h)
+            bottom_y = int(eye_bottom.y * h)
+
+            gaze_y = (iris_c[1] - top_y) / (bottom_y - top_y + 1e-6)
+
+            dx = gaze_x - 0.5
+            dy = gaze_y - 0.5
+
+            # ----- Temporal smoothing -----
+            smoothed_dx = SMOOTHING * smoothed_dx + (1 - SMOOTHING) * dx
+            smoothed_dy = SMOOTHING * smoothed_dy + (1 - SMOOTHING) * dy
+
+            # ----- Dominant direction (STABLE) -----
+            detected = "CENTER"
+            if abs(smoothed_dx) > abs(smoothed_dy):
+                if smoothed_dx < -H_THRESH:
+                    detected = "LEFT"
+                elif smoothed_dx > H_THRESH:
+                    detected = "RIGHT"
+            else:
+                if smoothed_dy < -UP_THRESH:
+                    detected = "UP"
+                elif smoothed_dy > DOWN_THRESH:
+                    detected = "DOWN"
+
+            cv2.putText(frame, f"Detected: {detected}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            # ----- Manual labeling -----
             label = None
             if key == ord('l'):
                 label = 0
             elif key == ord('r'):
                 label = 1
-            elif key == ord('c'):
+            elif key == ord('u'):
                 label = 2
-            elif key == ord('b'):
+            elif key == ord('d'):
                 label = 3
+            elif key == ord('c'):
+                label = 4
             elif key == ord('q'):
                 break
 
             if label is not None:
-                data.append([left_ear, right_ear, avg_ear, gaze_x, label])
+                data.append([
+                    left_ear,
+                    right_ear,
+                    avg_ear,
+                    smoothed_dx,
+                    smoothed_dy,
+                    label
+                ])
                 print("Saved sample:", label)
 
-            cv2.putText(frame, "Press L/R/C/B to label", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-
-        cv2.imshow("Day 5: Dataset Collection", frame)
+        cv2.imshow("Dataset Collection (Stable Gaze)", frame)
 
     cap.release()
     cv2.destroyAllWindows()
     face_landmarker.close()
 
-    # Save CSV
+    # ----- Save CSV -----
     with open("eye_movement_dataset.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["EAR_L", "EAR_R", "EAR_AVG", "GAZE_X", "LABEL"])
+        writer.writerow([
+            "EAR_L",
+            "EAR_R",
+            "EAR_AVG",
+            "DX",
+            "DY",
+            "LABEL"
+        ])
         writer.writerows(data)
 
     print("Dataset saved as eye_movement_dataset.csv")
