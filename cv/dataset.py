@@ -14,27 +14,37 @@ from mediapipe.tasks.python import vision
 LEFT_EYE  = [33, 159, 145, 133]
 RIGHT_EYE = [362, 386, 374, 263]
 
-LEFT_EYE_CORNERS = [33, 133]
-LEFT_EYE_TOP_BOTTOM = [159, 145]
+LEFT_EYE_CORNERS  = [33, 133]
+RIGHT_EYE_CORNERS = [362, 263]
 
-LEFT_IRIS = [468, 469, 470, 471]
+LEFT_IRIS  = [468, 469, 470, 471]
+RIGHT_IRIS = [472, 473, 474, 475]
 
 # -------------------------------
-# Parameters
+# Parameters 
 # -------------------------------
-H_THRESH = 0.18
-UP_THRESH = 0.20
-DOWN_THRESH = 0.10
-SMOOTHING = 0.8
+DEADZONE_X = 0.02
+DEADZONE_Y = 0.05  # Much stronger vertical dead-zone to protect CENTER
+
+H_THRESH = 0.04
+UP_THRESH = 0.08   # Stronger movement required to enter UP 
+UP_RETURN_THRESH = 0.04 # Hysteresis: Easier to stay UP once there
+DOWN_THRESH = 0.08 
+
+EAR_DOWN_RATIO = 0.90  
+DOWN_Y_THRESH = 0.01   
+
+SMOOTHING = 0.90   # Increased temporal smoothing to reduce flicker
+DOWN_FRAMES_REQ = 7    # DOWN requires 7 frames of sustained time-integration
 
 # -------------------------------
 # Utility functions
 # -------------------------------
-def compute_ear(eye_points):
-    left = np.array(eye_points[0])
-    top = np.array(eye_points[1])
-    bottom = np.array(eye_points[2])
-    right = np.array(eye_points[3])
+def compute_ear(face_landmarks, eye_indices, w, h):
+    left = np.array([face_landmarks[eye_indices[0]].x * w, face_landmarks[eye_indices[0]].y * h])
+    top = np.array([face_landmarks[eye_indices[1]].x * w, face_landmarks[eye_indices[1]].y * h])
+    bottom = np.array([face_landmarks[eye_indices[2]].x * w, face_landmarks[eye_indices[2]].y * h])
+    right = np.array([face_landmarks[eye_indices[3]].x * w, face_landmarks[eye_indices[3]].y * h])
 
     vertical = np.linalg.norm(top - bottom)
     horizontal = np.linalg.norm(left - right)
@@ -48,7 +58,6 @@ def iris_center(iris_points):
 # Main
 # -------------------------------
 def main():
-
     MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
 
     base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -64,14 +73,32 @@ def main():
     if not cap.isOpened():
         raise RuntimeError("Cannot open camera")
 
-    data = []
-
     smoothed_dx = 0.0
     smoothed_dy = 0.0
+    smoothed_ear = 0.0
+    down_frames = 0
+    current_state = "CENTER"
+
+    # Calibration variables
+    calib_duration = 2.0
+    is_calibrated = False
+    calib_dx_list = []
+    calib_dy_list = []
+    calib_ear_list = []
+
+    base_dx = 0.0
+    base_dy = 0.0
+    base_ear = 0.25 
 
     print("Press L / R / U / D / C to label | Q to quit")
+    print("Ensure the OpenCV window is selected/focused before pressing keys!")
+
+    window_name = "Dataset Collection (Stable Gaze)"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
     start_time = time.time()
+    DATA_FILE = "eye_movement_dataset.csv"
 
     while True:
         ret, frame = cap.read()
@@ -90,113 +117,146 @@ def main():
         timestamp_ms = int((time.time() - start_time) * 1000)
         result = face_landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        key = cv2.waitKey(1) & 0xFF
+        detected = "NO FACE"
+        elapsed = time.time() - start_time
 
         if result.face_landmarks:
             face_landmarks = result.face_landmarks[0]
 
-            # ----- EAR -----
-            left_eye_pts = [(int(face_landmarks[i].x * w),
-                             int(face_landmarks[i].y * h)) for i in LEFT_EYE]
-
-            right_eye_pts = [(int(face_landmarks[i].x * w),
-                              int(face_landmarks[i].y * h)) for i in RIGHT_EYE]
-
-            left_ear = compute_ear(left_eye_pts)
-            right_ear = compute_ear(right_eye_pts)
+            left_ear = compute_ear(face_landmarks, LEFT_EYE, w, h)
+            right_ear = compute_ear(face_landmarks, RIGHT_EYE, w, h)
             avg_ear = (left_ear + right_ear) / 2.0
 
-            # ----- Iris & gaze ratios -----
-            eye_left = face_landmarks[LEFT_EYE_CORNERS[0]]
-            eye_right = face_landmarks[LEFT_EYE_CORNERS[1]]
+            eye_left_l_pt = face_landmarks[LEFT_EYE_CORNERS[0]]
+            eye_left_r_pt = face_landmarks[LEFT_EYE_CORNERS[1]]
+            l_lex, l_ley = eye_left_l_pt.x * w, eye_left_l_pt.y * h
+            l_rex, l_rey = eye_left_r_pt.x * w, eye_left_r_pt.y * h
 
-            lex = int(eye_left.x * w)
-            rex = int(eye_right.x * w)
+            eye_right_l_pt = face_landmarks[RIGHT_EYE_CORNERS[0]]
+            eye_right_r_pt = face_landmarks[RIGHT_EYE_CORNERS[1]]
+            r_lex, r_ley = eye_right_l_pt.x * w, eye_right_l_pt.y * h
+            r_rex, r_rey = eye_right_r_pt.x * w, eye_right_r_pt.y * h
 
-            iris_pts = [(int(face_landmarks[i].x * w),
-                         int(face_landmarks[i].y * h)) for i in LEFT_IRIS]
+            left_iris_pts = [(int(face_landmarks[i].x * w), int(face_landmarks[i].y * h)) for i in LEFT_IRIS]
+            right_iris_pts = [(int(face_landmarks[i].x * w), int(face_landmarks[i].y * h)) for i in RIGHT_IRIS]
 
-            iris_c = iris_center(iris_pts)
+            left_iris_c = iris_center(left_iris_pts)
+            right_iris_c = iris_center(right_iris_pts)
 
-            gaze_x = (iris_c[0] - lex) / (rex - lex + 1e-6)
+            left_cx = (l_lex + l_rex) / 2.0
+            left_cy = (l_ley + l_rey) / 2.0
+            left_w = abs(l_rex - l_lex) + 1e-6
 
-            eye_top = face_landmarks[LEFT_EYE_TOP_BOTTOM[0]]
-            eye_bottom = face_landmarks[LEFT_EYE_TOP_BOTTOM[1]]
+            right_cx = (r_lex + r_rex) / 2.0
+            right_cy = (r_ley + r_rey) / 2.0
+            right_w = abs(r_rex - r_lex) + 1e-6
 
-            top_y = int(eye_top.y * h)
-            bottom_y = int(eye_bottom.y * h)
+            gaze_x_left = (left_iris_c[0] - left_cx) / left_w
+            gaze_y_left = (left_iris_c[1] - left_cy) / left_w
 
-            gaze_y = (iris_c[1] - top_y) / (bottom_y - top_y + 1e-6)
+            gaze_x_right = (right_iris_c[0] - right_cx) / right_w
+            gaze_y_right = (right_iris_c[1] - right_cy) / right_w
 
-            dx = gaze_x - 0.5
-            dy = gaze_y - 0.5
+            raw_dx = (gaze_x_left + gaze_x_right) / 2.0
+            raw_dy = (gaze_y_left + gaze_y_right) / 2.0
 
-            # ----- Temporal smoothing -----
-            smoothed_dx = SMOOTHING * smoothed_dx + (1 - SMOOTHING) * dx
-            smoothed_dy = SMOOTHING * smoothed_dy + (1 - SMOOTHING) * dy
-
-            # ----- Dominant direction (STABLE) -----
-            detected = "CENTER"
-            if abs(smoothed_dx) > abs(smoothed_dy):
-                if smoothed_dx < -H_THRESH:
-                    detected = "LEFT"
-                elif smoothed_dx > H_THRESH:
-                    detected = "RIGHT"
+            if not is_calibrated:
+                if elapsed < calib_duration:
+                    calib_dx_list.append(raw_dx)
+                    calib_dy_list.append(raw_dy)
+                    calib_ear_list.append(avg_ear)
+                    detected = "CALIBRATING... LOOK CENTER"
+                else:
+                    if len(calib_dx_list) > 0:
+                        base_dx = np.mean(calib_dx_list)
+                        base_dy = np.mean(calib_dy_list)
+                        base_ear = np.mean(calib_ear_list)
+                    is_calibrated = True
+                    print(f"Calibrated: base_dx={base_dx:.3f}, base_dy={base_dy:.3f}, base_ear={base_ear:.3f}")
             else:
-                if smoothed_dy < -UP_THRESH:
-                    detected = "UP"
-                elif smoothed_dy > DOWN_THRESH:
+                dx_adj = raw_dx - base_dx
+                dy_adj = raw_dy - base_dy
+
+                smoothed_dx = SMOOTHING * smoothed_dx + (1 - SMOOTHING) * dx_adj
+                smoothed_dy = SMOOTHING * smoothed_dy + (1 - SMOOTHING) * dy_adj
+                smoothed_ear = SMOOTHING * smoothed_ear + (1 - SMOOTHING) * avg_ear
+
+                # DOWN Time-based confirmation via Eye Openness (EAR)
+                if smoothed_ear < base_ear * EAR_DOWN_RATIO and smoothed_dy > DOWN_Y_THRESH:
+                    down_frames = min(DOWN_FRAMES_REQ + 1, down_frames + 1)
+                else:
+                    down_frames = 0
+
+                if down_frames > DOWN_FRAMES_REQ:
                     detected = "DOWN"
+                elif abs(smoothed_dx) < DEADZONE_X and abs(smoothed_dy) < DEADZONE_Y:
+                    detected = "CENTER"  # Strict dead-zone protects neutral gaze
+                else:
+                    # Apply Hysteresis to UP detection
+                    active_up_threshold = UP_RETURN_THRESH if current_state == "UP" else UP_THRESH
 
+                    is_up = smoothed_dy < -active_up_threshold
+                    is_down = smoothed_dy > DOWN_THRESH
+                    is_left = smoothed_dx < -H_THRESH
+                    is_right = smoothed_dx > H_THRESH
+
+                    # Prioritize vertical detection if vertical thresholds are cleared,
+                    # because vertical eye mobility is structurally more restricted than horizontal.
+                    if is_up:
+                        detected = "UP"
+                    elif is_down:
+                        detected = "DOWN"
+                    elif is_left:
+                        detected = "LEFT"
+                    elif is_right:
+                        detected = "RIGHT"
+                    else:
+                        detected = "CENTER"
+                
+                current_state = detected  # Track state for hysteresis
+
+            color = (0, 0, 255) if detected == "CALIBRATING... LOOK CENTER" else (0, 255, 0)
             cv2.putText(frame, f"Detected: {detected}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-            # ----- Manual labeling -----
-            label = None
-            if key == ord('l'):
-                label = 0
-            elif key == ord('r'):
-                label = 1
-            elif key == ord('u'):
-                label = 2
-            elif key == ord('d'):
-                label = 3
-            elif key == ord('c'):
-                label = 4
-            elif key == ord('q'):
+        cv2.imshow(window_name, frame)
+        key = cv2.waitKey(1) & 0xFF
+
+        if key != 255:  
+            if key == ord('q') or key == ord('Q'):
+                print("Key 'Q' pressed. Quitting...")
                 break
 
-            if label is not None:
-                data.append([
-                    left_ear,
-                    right_ear,
-                    avg_ear,
-                    smoothed_dx,
-                    smoothed_dy,
-                    label
-                ])
-                print("Saved sample:", label)
+            if result.face_landmarks and is_calibrated:
+                label = None
+                if key == ord('l') or key == ord('L'):
+                    label = 0
+                    print("Key 'L' pressed -> Label: 0 (LEFT)")
+                elif key == ord('r') or key == ord('R'):
+                    label = 1
+                    print("Key 'R' pressed -> Label: 1 (RIGHT)")
+                elif key == ord('u') or key == ord('U'):
+                    label = 2
+                    print("Key 'U' pressed -> Label: 2 (UP)")
+                elif key == ord('d') or key == ord('D'):
+                    label = 3
+                    print("Key 'D' pressed -> Label: 3 (DOWN)")
+                elif key == ord('c') or key == ord('C'):
+                    label = 4
+                    print("Key 'C' pressed -> Label: 4 (CENTER)")
 
-        cv2.imshow("Dataset Collection (Stable Gaze)", frame)
+                if label is not None:
+                    file_exists = os.path.isfile(DATA_FILE)
+                    with open(DATA_FILE, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        if not file_exists:
+                            writer.writerow(["EAR_L", "EAR_R", "EAR_AVG", "DX", "DY", "LABEL"])
+                        writer.writerow([left_ear, right_ear, smoothed_ear, smoothed_dx, smoothed_dy, label])
+                    print("-> Saved sample:", label)
 
     cap.release()
     cv2.destroyAllWindows()
     face_landmarker.close()
-
-    # ----- Save CSV -----
-    with open("eye_movement_dataset.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "EAR_L",
-            "EAR_R",
-            "EAR_AVG",
-            "DX",
-            "DY",
-            "LABEL"
-        ])
-        writer.writerows(data)
-
-    print("Dataset saved as eye_movement_dataset.csv")
 
 if __name__ == "__main__":
     main()
