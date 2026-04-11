@@ -2,6 +2,7 @@ import cv2
 import time
 import numpy as np
 import os
+import joblib
 
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -36,6 +37,10 @@ DOWN_Y_THRESH = 0.01   # Minimal downward iris required when eyelid drops
 SMOOTHING = 0.85
 DOWN_FRAMES_REQ = 7    # DOWN requires 7 frames of sustained time-integration  # Stronger temporal smoothing 
 
+STABLE_FRAMES_REQ = 5  # Frames required to reliably trigger cursor movement
+BLINK_THRESH_RATIO = 0.85 # Frame EAR must fall below 85% of baseline
+LONG_BLINK_TIME = 0.8  # Seconds for a long blink
+
 # -------------------------------
 # Utility functions
 # -------------------------------
@@ -53,11 +58,50 @@ def compute_ear(face_landmarks, eye_indices, w, h):
 def iris_center(iris_points):
     return np.mean(np.array(iris_points), axis=0)
 
+def draw_ui(frame, selection, gaze_text, blink_status, selected_option):
+    h, w, _ = frame.shape
+    grid_texts = [["YES", "NO"], ["HELP", "WATER"]]
+    cell_w = w // 2
+    cell_h = 100
+    
+    # Draw Grid at bottom
+    for r in range(2):
+        for c in range(2):
+            x1, y1 = c * cell_w, h - 200 + r * cell_h
+            x2, y2 = x1 + cell_w, y1 + cell_h
+            
+            color = (200, 200, 200)
+            if selection == [r, c]:
+                color = (0, 255, 0) # Highlight selected
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, -1)
+                text_color = (0, 0, 0)
+            else:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                text_color = color
+                
+            # Center text in cell
+            text = grid_texts[r][c]
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+            cx = x1 + (cell_w - text_size[0]) // 2
+            cy = y1 + (cell_h + text_size[1]) // 2
+            cv2.putText(frame, text, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1, text_color, 2)
+
+    # Draw Status Overlay at top
+    cv2.putText(frame, f"Gaze: {gaze_text}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+    cv2.putText(frame, f"Blink State: {blink_status}", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    if selected_option:
+        cv2.putText(frame, f"Last Selected: {selected_option}", (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
 # -------------------------------
 # Main
 # -------------------------------
 def main():
     MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
+    RF_MODEL_PATH = os.path.join(os.path.dirname(__file__), "gaze_blink_rf_model.pkl")
+    SCALER_PATH = os.path.join(os.path.dirname(__file__), "feature_scaler.pkl")
+
+    rf_model = joblib.load(RF_MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
 
     base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
     options = vision.FaceLandmarkerOptions(
@@ -77,6 +121,19 @@ def main():
     smoothed_ear = 0.0
     down_frames = 0
 
+    # UI & Assistive State Variables
+    ui_selection = [0, 0] # [row, col]
+    selected_option = ""
+    grid_texts = [["YES", "NO"], ["HELP", "WATER"]]
+    
+    stable_gaze_frames = 0
+    last_gaze_pred = "CENTER"
+    confirmed_gaze = "CENTER"
+    
+    blink_start_time = 0
+    is_blinking = False
+    blink_status = "None"
+    long_blink_triggered = False
     # Calibration variables
     calib_duration = 2.0
     is_calibrated = False
@@ -177,35 +234,58 @@ def main():
                 smoothed_dy = SMOOTHING * smoothed_dy + (1 - SMOOTHING) * dy_adj
                 smoothed_ear = SMOOTHING * smoothed_ear + (1 - SMOOTHING) * avg_ear
 
-                # DOWN Time-based confirmation via Eye Openness (EAR)
-                if smoothed_ear < base_ear * EAR_DOWN_RATIO and smoothed_dy > DOWN_Y_THRESH:
-                    down_frames += 1
-                else:
-                    down_frames = max(0, down_frames - 1)
+                # 1. BLINK DETECTION
+                current_blink_active = avg_ear < base_ear * BLINK_THRESH_RATIO
+                if current_blink_active:
+                    if not is_blinking: # Just started blinking
+                        is_blinking = True
+                        blink_start_time = time.time()
+                        long_blink_triggered = False
+                        blink_status = "Blinking..."
+                    else: # Currently blinking
+                        if time.time() - blink_start_time > LONG_BLINK_TIME:
+                            if not long_blink_triggered:
+                                blink_status = "Long Blink"
+                                long_blink_triggered = True
+                else: # Eyes are open
+                    if is_blinking:
+                        if not long_blink_triggered:
+                            # Short blink finished! Trigger selection.
+                            selected_option = grid_texts[ui_selection[0]][ui_selection[1]]
+                            print(f">>> SELECTED: {selected_option}")
+                        
+                        is_blinking = False
+                        blink_status = "None"
 
-                # Direction logic
-                if down_frames > DOWN_FRAMES_REQ:
-                    gaze_text = "DOWN"
-                elif abs(smoothed_dx) < DEADZONE_X and abs(smoothed_dy) < DEADZONE_Y:
-                    gaze_text = "CENTER"  # Strict dead-zone protects neutral gaze
-                else:
-                    is_up = smoothed_dy < -UP_THRESH
-                    is_down = smoothed_dy > DOWN_THRESH
-                    is_left = smoothed_dx < -H_THRESH
-                    is_right = smoothed_dx > H_THRESH
+                # 2. MACHINE LEARNING PREDICTION
+                features = np.array([[left_ear, right_ear, avg_ear, smoothed_dx, smoothed_dy]])
+                scaled_features = scaler.transform(features)
+                pred = rf_model.predict(scaled_features)[0]
 
-                    # Prioritize vertical detection if vertical thresholds are cleared,
-                    # because vertical eye mobility is structurally more restricted than horizontal.
-                    if is_up:
-                        gaze_text = "UP"
-                    elif is_down:
-                        gaze_text = "DOWN"
-                    elif is_left:
-                        gaze_text = "LEFT"
-                    elif is_right:
-                        gaze_text = "RIGHT"
-                    else:
-                        gaze_text = "CENTER"
+                label_map = {0: "LEFT", 1: "RIGHT", 2: "UP", 3: "DOWN", 4: "CENTER"}
+                raw_gaze = label_map.get(pred, "CENTER")
+
+                # 3. STABLE GAZE OUTPUT & CONTROL LOGIC
+                if raw_gaze == last_gaze_pred:
+                    stable_gaze_frames += 1
+                else:
+                    stable_gaze_frames = 0
+                
+                last_gaze_pred = raw_gaze
+
+                if stable_gaze_frames == STABLE_FRAMES_REQ:
+                    confirmed_gaze = raw_gaze
+                    # Move grid selection on confirmation
+                    if confirmed_gaze == "LEFT":
+                        ui_selection[1] = max(0, ui_selection[1] - 1)
+                    elif confirmed_gaze == "RIGHT":
+                        ui_selection[1] = min(1, ui_selection[1] + 1)
+                    elif confirmed_gaze == "UP":
+                        ui_selection[0] = max(0, ui_selection[0] - 1)
+                    elif confirmed_gaze == "DOWN":
+                        ui_selection[0] = min(1, ui_selection[0] + 1)
+                
+                gaze_text = confirmed_gaze
 
             # Draw eye indicators
             for (x, y) in left_iris_pts + right_iris_pts:
@@ -214,10 +294,10 @@ def main():
             cv2.circle(frame, tuple(left_iris_c.astype(int)), 3, (0, 0, 255), -1)
             cv2.circle(frame, tuple(right_iris_c.astype(int)), 3, (0, 0, 255), -1)
 
-        color = (0, 0, 255) if gaze_text == "CALIBRATING... LOOK CENTER" else (255, 0, 0)
-        cv2.putText(frame, gaze_text, (30, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1,
-                    color, 2)
+        if not is_calibrated:
+            cv2.putText(frame, "CALIBRATING... LOOK CENTER", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        else:
+            draw_ui(frame, ui_selection, gaze_text, blink_status, selected_option)
 
         cv2.imshow("Stable Gaze Tracking", frame)
 

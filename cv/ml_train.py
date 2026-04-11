@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import joblib
+import os
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -11,11 +12,11 @@ from sklearn.metrics import accuracy_score, confusion_matrix, classification_rep
 # -------------------------------
 # Load dataset
 # -------------------------------
-DATASET_PATH = "eye_movement_dataset.csv"
+DATASET_PATH = os.path.join(os.path.dirname(__file__), "eye_movement_dataset.csv")
 
 data = pd.read_csv(DATASET_PATH)
 
-X = data[["EAR_L", "EAR_R", "EAR_AVG", "GAZE_X"]]
+X = data[["EAR_L", "EAR_R", "EAR_AVG", "DX", "DY"]]
 y = data["LABEL"]
 
 # -------------------------------
@@ -53,9 +54,9 @@ rf_model = RandomForestClassifier(
     max_depth=10,
     random_state=42
 )
-rf_model.fit(X_train, y_train)
+rf_model.fit(X_train_scaled, y_train)
 
-y_pred_rf = rf_model.predict(X_test)
+y_pred_rf = rf_model.predict(X_test_scaled)
 
 print("\n--- Random Forest Results ---")
 print("Accuracy:", accuracy_score(y_test, y_pred_rf))
@@ -65,7 +66,7 @@ print("Classification Report:\n", classification_report(y_test, y_pred_rf))
 # -------------------------------
 # Save best model
 # -------------------------------
-joblib.dump(rf_model, "gaze_blink_rf_model.pkl")
-joblib.dump(scaler, "feature_scaler.pkl")
+joblib.dump(rf_model, os.path.join(os.path.dirname(__file__), "gaze_blink_rf_model.pkl"))
+joblib.dump(scaler, os.path.join(os.path.dirname(__file__), "feature_scaler.pkl"))
 
 print("\nModels saved successfully.")
