@@ -24,16 +24,17 @@ RIGHT_IRIS = [472, 473, 474, 475]
 # Parameters 
 # -------------------------------
 DEADZONE_X = 0.02
-DEADZONE_Y = 0.03  # Stronger vertical dead-zone to protect CENTER
+DEADZONE_Y = 0.05  # Much stronger vertical dead-zone to protect CENTER
 
 H_THRESH = 0.04
-UP_THRESH = 0.06   # Harder to trigger UP
-DOWN_THRESH = 0.08 # Hardest raw threshold for DOWN
+UP_THRESH = 0.08   # Stronger movement required to enter UP 
+UP_RETURN_THRESH = 0.04 # Hysteresis: Easier to stay UP once there
+DOWN_THRESH = 0.08 
 
-EAR_DOWN_RATIO = 0.90  # Eyelid needs to close by ~10% (was 15%) to be sensitive to DOWN
-DOWN_Y_THRESH = 0.01   # Minimal downward iris required when eyelid drops
+EAR_DOWN_RATIO = 0.90  
+DOWN_Y_THRESH = 0.01   
 
-SMOOTHING = 0.85
+SMOOTHING = 0.90   # Increased temporal smoothing to reduce flicker
 DOWN_FRAMES_REQ = 7    # DOWN requires 7 frames of sustained time-integration
 
 # -------------------------------
@@ -76,6 +77,7 @@ def main():
     smoothed_dy = 0.0
     smoothed_ear = 0.0
     down_frames = 0
+    current_state = "CENTER"
 
     # Calibration variables
     calib_duration = 2.0
@@ -97,7 +99,6 @@ def main():
 
     start_time = time.time()
     DATA_FILE = "eye_movement_dataset.csv"
-    samples_saved = 0
 
     while True:
         ret, frame = cap.read()
@@ -182,16 +183,19 @@ def main():
 
                 # DOWN Time-based confirmation via Eye Openness (EAR)
                 if smoothed_ear < base_ear * EAR_DOWN_RATIO and smoothed_dy > DOWN_Y_THRESH:
-                    down_frames = min(DOWN_FRAMES_REQ + 1, down_frames + 1)  # Cap it so it doesn't buffer infinity
+                    down_frames = min(DOWN_FRAMES_REQ + 1, down_frames + 1)
                 else:
-                    down_frames = 0  # Instantly clear down buffer when look normalizes to prevent freezing
+                    down_frames = 0
 
                 if down_frames > DOWN_FRAMES_REQ:
                     detected = "DOWN"
                 elif abs(smoothed_dx) < DEADZONE_X and abs(smoothed_dy) < DEADZONE_Y:
                     detected = "CENTER"  # Strict dead-zone protects neutral gaze
                 else:
-                    is_up = smoothed_dy < -UP_THRESH
+                    # Apply Hysteresis to UP detection
+                    active_up_threshold = UP_RETURN_THRESH if current_state == "UP" else UP_THRESH
+
+                    is_up = smoothed_dy < -active_up_threshold
                     is_down = smoothed_dy > DOWN_THRESH
                     is_left = smoothed_dx < -H_THRESH
                     is_right = smoothed_dx > H_THRESH
@@ -208,6 +212,8 @@ def main():
                         detected = "RIGHT"
                     else:
                         detected = "CENTER"
+                
+                current_state = detected  # Track state for hysteresis
 
             color = (0, 0, 255) if detected == "CALIBRATING... LOOK CENTER" else (0, 255, 0)
             cv2.putText(frame, f"Detected: {detected}", (20, 40),
@@ -241,20 +247,12 @@ def main():
 
                 if label is not None:
                     file_exists = os.path.isfile(DATA_FILE)
-                    is_empty = False
-                    if file_exists:
-                        is_empty = os.stat(DATA_FILE).st_size == 0
-
                     with open(DATA_FILE, "a", newline="") as f:
                         writer = csv.writer(f)
-                        # Explicitly hook empty state to header injection
-                        if not file_exists or is_empty:
+                        if not file_exists:
                             writer.writerow(["EAR_L", "EAR_R", "EAR_AVG", "DX", "DY", "LABEL"])
-                        
                         writer.writerow([left_ear, right_ear, smoothed_ear, smoothed_dx, smoothed_dy, label])
-                    
-                    samples_saved += 1
-                    print(f"-> Saved sample #{samples_saved}: Label={label} appended to {DATA_FILE}")
+                    print("-> Saved sample:", label)
 
     cap.release()
     cv2.destroyAllWindows()
