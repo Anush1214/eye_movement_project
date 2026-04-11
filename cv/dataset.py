@@ -24,16 +24,17 @@ RIGHT_IRIS = [472, 473, 474, 475]
 # Parameters 
 # -------------------------------
 DEADZONE_X = 0.02
-DEADZONE_Y = 0.02
+DEADZONE_Y = 0.03  # Stronger vertical dead-zone to protect CENTER
 
 H_THRESH = 0.04
-UP_THRESH = 0.04
-DOWN_THRESH = 0.04
+UP_THRESH = 0.06   # Harder to trigger UP
+DOWN_THRESH = 0.08 # Hardest raw threshold for DOWN
 
-EAR_DOWN_RATIO = 0.85
-DOWN_Y_THRESH = 0.02
+EAR_DOWN_RATIO = 0.90  # Eyelid needs to close by ~10% (was 15%) to be sensitive to DOWN
+DOWN_Y_THRESH = 0.01   # Minimal downward iris required when eyelid drops
 
 SMOOTHING = 0.85
+DOWN_FRAMES_REQ = 7    # DOWN requires 7 frames of sustained time-integration
 
 # -------------------------------
 # Utility functions
@@ -96,6 +97,7 @@ def main():
 
     start_time = time.time()
     DATA_FILE = "eye_movement_dataset.csv"
+    samples_saved = 0
 
     while True:
         ret, frame = cap.read()
@@ -178,30 +180,34 @@ def main():
                 smoothed_dy = SMOOTHING * smoothed_dy + (1 - SMOOTHING) * dy_adj
                 smoothed_ear = SMOOTHING * smoothed_ear + (1 - SMOOTHING) * avg_ear
 
+                # DOWN Time-based confirmation via Eye Openness (EAR)
                 if smoothed_ear < base_ear * EAR_DOWN_RATIO and smoothed_dy > DOWN_Y_THRESH:
-                    down_frames += 1
+                    down_frames = min(DOWN_FRAMES_REQ + 1, down_frames + 1)  # Cap it so it doesn't buffer infinity
                 else:
-                    down_frames = max(0, down_frames - 1)
+                    down_frames = 0  # Instantly clear down buffer when look normalizes to prevent freezing
 
-                if down_frames > 5:
+                if down_frames > DOWN_FRAMES_REQ:
                     detected = "DOWN"
                 elif abs(smoothed_dx) < DEADZONE_X and abs(smoothed_dy) < DEADZONE_Y:
-                    detected = "CENTER"
+                    detected = "CENTER"  # Strict dead-zone protects neutral gaze
                 else:
-                    if abs(smoothed_dx) > abs(smoothed_dy) * 1.2:
-                        if smoothed_dx < -H_THRESH:
-                            detected = "LEFT"
-                        elif smoothed_dx > H_THRESH:
-                            detected = "RIGHT"
-                        else:
-                            detected = "CENTER"
+                    is_up = smoothed_dy < -UP_THRESH
+                    is_down = smoothed_dy > DOWN_THRESH
+                    is_left = smoothed_dx < -H_THRESH
+                    is_right = smoothed_dx > H_THRESH
+
+                    # Prioritize vertical detection if vertical thresholds are cleared,
+                    # because vertical eye mobility is structurally more restricted than horizontal.
+                    if is_up:
+                        detected = "UP"
+                    elif is_down:
+                        detected = "DOWN"
+                    elif is_left:
+                        detected = "LEFT"
+                    elif is_right:
+                        detected = "RIGHT"
                     else:
-                        if smoothed_dy < -UP_THRESH:
-                            detected = "UP"
-                        elif smoothed_dy > DOWN_THRESH:
-                            detected = "DOWN"
-                        else:
-                            detected = "CENTER"
+                        detected = "CENTER"
 
             color = (0, 0, 255) if detected == "CALIBRATING... LOOK CENTER" else (0, 255, 0)
             cv2.putText(frame, f"Detected: {detected}", (20, 40),
@@ -235,12 +241,20 @@ def main():
 
                 if label is not None:
                     file_exists = os.path.isfile(DATA_FILE)
+                    is_empty = False
+                    if file_exists:
+                        is_empty = os.stat(DATA_FILE).st_size == 0
+
                     with open(DATA_FILE, "a", newline="") as f:
                         writer = csv.writer(f)
-                        if not file_exists:
+                        # Explicitly hook empty state to header injection
+                        if not file_exists or is_empty:
                             writer.writerow(["EAR_L", "EAR_R", "EAR_AVG", "DX", "DY", "LABEL"])
+                        
                         writer.writerow([left_ear, right_ear, smoothed_ear, smoothed_dx, smoothed_dy, label])
-                    print("-> Saved sample:", label)
+                    
+                    samples_saved += 1
+                    print(f"-> Saved sample #{samples_saved}: Label={label} appended to {DATA_FILE}")
 
     cap.release()
     cv2.destroyAllWindows()

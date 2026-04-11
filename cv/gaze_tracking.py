@@ -24,16 +24,17 @@ RIGHT_IRIS = [472, 473, 474, 475]
 # -------------------------------
 # Tweaked these thresholds for stability
 DEADZONE_X = 0.02
-DEADZONE_Y = 0.02
+DEADZONE_Y = 0.03  # Stronger vertical dead-zone to protect CENTER
 
 H_THRESH = 0.04
-UP_THRESH = 0.04
-DOWN_THRESH = 0.04
+UP_THRESH = 0.06   # Harder to trigger UP
+DOWN_THRESH = 0.08 # Hardest raw threshold for DOWN
 
-EAR_DOWN_RATIO = 0.85
-DOWN_Y_THRESH = 0.02
+EAR_DOWN_RATIO = 0.90  # Eyelid needs to close by ~10% (was 15%) to be sensitive to DOWN
+DOWN_Y_THRESH = 0.01   # Minimal downward iris required when eyelid drops
 
-SMOOTHING = 0.85  # Stronger temporal smoothing 
+SMOOTHING = 0.85
+DOWN_FRAMES_REQ = 7    # DOWN requires 7 frames of sustained time-integration  # Stronger temporal smoothing 
 
 # -------------------------------
 # Utility functions
@@ -176,33 +177,35 @@ def main():
                 smoothed_dy = SMOOTHING * smoothed_dy + (1 - SMOOTHING) * dy_adj
                 smoothed_ear = SMOOTHING * smoothed_ear + (1 - SMOOTHING) * avg_ear
 
-                # DOWN Time-based confirmation
+                # DOWN Time-based confirmation via Eye Openness (EAR)
                 if smoothed_ear < base_ear * EAR_DOWN_RATIO and smoothed_dy > DOWN_Y_THRESH:
                     down_frames += 1
                 else:
                     down_frames = max(0, down_frames - 1)
 
                 # Direction logic
-                if down_frames > 5:
+                if down_frames > DOWN_FRAMES_REQ:
                     gaze_text = "DOWN"
                 elif abs(smoothed_dx) < DEADZONE_X and abs(smoothed_dy) < DEADZONE_Y:
-                    gaze_text = "CENTER"
+                    gaze_text = "CENTER"  # Strict dead-zone protects neutral gaze
                 else:
-                    # Determine primary axis (add 1.2x weight to horizontal to favor looking left/right over slight up/down noise)
-                    if abs(smoothed_dx) > abs(smoothed_dy) * 1.2:
-                        if smoothed_dx < -H_THRESH:
-                            gaze_text = "LEFT"
-                        elif smoothed_dx > H_THRESH:
-                            gaze_text = "RIGHT"
-                        else:
-                            gaze_text = "CENTER"
+                    is_up = smoothed_dy < -UP_THRESH
+                    is_down = smoothed_dy > DOWN_THRESH
+                    is_left = smoothed_dx < -H_THRESH
+                    is_right = smoothed_dx > H_THRESH
+
+                    # Prioritize vertical detection if vertical thresholds are cleared,
+                    # because vertical eye mobility is structurally more restricted than horizontal.
+                    if is_up:
+                        gaze_text = "UP"
+                    elif is_down:
+                        gaze_text = "DOWN"
+                    elif is_left:
+                        gaze_text = "LEFT"
+                    elif is_right:
+                        gaze_text = "RIGHT"
                     else:
-                        if smoothed_dy < -UP_THRESH:
-                            gaze_text = "UP"
-                        elif smoothed_dy > DOWN_THRESH: # fallback structural DOWN
-                            gaze_text = "DOWN"
-                        else:
-                            gaze_text = "CENTER"
+                        gaze_text = "CENTER"
 
             # Draw eye indicators
             for (x, y) in left_iris_pts + right_iris_pts:
