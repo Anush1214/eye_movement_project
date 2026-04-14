@@ -3,6 +3,7 @@ import time
 import numpy as np
 import os
 import joblib
+import pyttsx3
 
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -111,6 +112,24 @@ def main():
     )
 
     face_landmarker = vision.FaceLandmarker.create_from_options(options)
+
+    # Initialize TTS engine once
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 165)
+    engine.setProperty('volume', 1.0)
+    voices = engine.getProperty('voices')
+    best_voice_id = None
+    for voice in voices:
+        name = voice.name.lower()
+        if 'female' in name or 'zira' in name or 'samantha' in name:
+            best_voice_id = voice.id
+            break
+    if best_voice_id:
+        engine.setProperty('voice', best_voice_id)
+
+    last_spoken = None
+    last_spoken_time = 0.0
+    cooldown_seconds = 1.0
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -253,6 +272,15 @@ def main():
                             # Short blink finished! Trigger selection.
                             selected_option = grid_texts[ui_selection[0]][ui_selection[1]]
                             print(f">>> SELECTED: {selected_option}")
+                            
+                            # Speech execution
+                            current_time = time.time()
+                            if selected_option and selected_option != last_spoken:
+                                if (current_time - last_spoken_time) > cooldown_seconds:
+                                    engine.say(selected_option)
+                                    engine.runAndWait()
+                                    last_spoken = selected_option
+                                    last_spoken_time = current_time
                         
                         is_blinking = False
                         blink_status = "None"
