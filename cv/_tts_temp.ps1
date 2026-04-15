@@ -1,2 +1,2 @@
 $sp = New-Object -ComObject SAPI.SpVoice
-$sp.Speak('YES') | Out-Null
+$sp.Speak('WATER') | Out-Null
