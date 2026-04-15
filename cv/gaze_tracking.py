@@ -3,7 +3,9 @@ import time
 import numpy as np
 import os
 import joblib
-import pyttsx3
+import threading
+import subprocess
+import sys
 
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -113,23 +115,38 @@ def main():
 
     face_landmarker = vision.FaceLandmarker.create_from_options(options)
 
-    # Initialize TTS engine once
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 165)
-    engine.setProperty('volume', 1.0)
-    voices = engine.getProperty('voices')
-    best_voice_id = None
-    for voice in voices:
-        name = voice.name.lower()
-        if 'female' in name or 'zira' in name or 'samantha' in name:
-            best_voice_id = voice.id
-            break
-    if best_voice_id:
-        engine.setProperty('voice', best_voice_id)
+    # TTS: Use PowerShell SAPI via .ps1 file — avoids shell variable escaping issues
+    tts_busy = threading.Event()  # set = busy, clear = free
+
+    def speak_async(text):
+        """Speak text via Windows PowerShell SAPI in a background thread."""
+        if tts_busy.is_set():
+            return  # Skip if already speaking
+        def _speak():
+            tts_busy.set()
+            try:
+                ps1_path = os.path.join(os.path.dirname(__file__), "_tts_temp.ps1")
+                ps1_content = (
+                    "$sp = New-Object -ComObject SAPI.SpVoice\n"
+                    f"$sp.Speak('{text}') | Out-Null\n"
+                )
+                with open(ps1_path, "w") as f:
+                    f.write(ps1_content)
+                subprocess.run(
+                    ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps1_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            except Exception as e:
+                print(f"TTS error: {e}")
+            finally:
+                tts_busy.clear()
+        t = threading.Thread(target=_speak, daemon=True)
+        t.start()
 
     last_spoken = None
     last_spoken_time = 0.0
-    cooldown_seconds = 1.0
+    cooldown_seconds = 1.5
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -273,14 +290,12 @@ def main():
                             selected_option = grid_texts[ui_selection[0]][ui_selection[1]]
                             print(f">>> SELECTED: {selected_option}")
                             
-                            # Speech execution
+                            # Speech execution (non-blocking)
                             current_time = time.time()
-                            if selected_option and selected_option != last_spoken:
-                                if (current_time - last_spoken_time) > cooldown_seconds:
-                                    engine.say(selected_option)
-                                    engine.runAndWait()
-                                    last_spoken = selected_option
-                                    last_spoken_time = current_time
+                            if selected_option and (current_time - last_spoken_time) > cooldown_seconds:
+                                speak_async(selected_option)
+                                last_spoken = selected_option
+                                last_spoken_time = current_time
                         
                         is_blinking = False
                         blink_status = "None"
