@@ -175,6 +175,9 @@ cv/
 **Anush Rao**
 AIML Engineer | AI Systems Builder
 
+**Arya G Bhat**
+AIML Engineer
+
 ---
 
 <p align="center">
